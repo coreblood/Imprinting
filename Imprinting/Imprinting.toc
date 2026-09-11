@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: Imprinting
+## Notes: Standalone remake of the Uncapped Extraction tab - unlock and imprint procs.
+## Author: Mhortai
+## Version: 1.0.0
+## SavedVariables: ImprintingDB
+
+Imprinting.lua
