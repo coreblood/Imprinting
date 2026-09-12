@@ -9,7 +9,7 @@
 -- ICEXI dialect (requested) and the ICINV dialect (pushed by the live realm).
 -- ============================================================================
 
-local VERSION = "1.0.0"
+local VERSION = "1.0.1"
 local SEND_PREFIX, RECV_PREFIX = "REAGENTBANK", "UNC"
 local ME = UnitName("player")
 
@@ -127,6 +127,50 @@ local function rebuildFromBuckets()
   return out
 end
 
+-- The ICEXI stream carries only an item's NATIVE (extractable) procs; imprinted
+-- procs live in the ICINV stream's buckets. Union both onto each gear row so
+-- "what this piece already carries" is the truth, not just the template.
+-- Worn rows map to "E:<invSlot>" buckets via the item entry actually worn
+-- (identical twins paired in slot order); bag rows by exact server coords.
+local function mergeBucketProcs()
+  local slotsByEntry = {}
+  for slot = 1, 19 do
+    local link = GetInventoryItemLink("player", slot)
+    local id = link and tonumber(link:match("item:(%d+)"))
+    if id then
+      slotsByEntry[id] = slotsByEntry[id] or {}
+      tinsert(slotsByEntry[id], slot)
+    end
+  end
+  local nthOfEntry = {}
+  for _, it in ipairs(state.items) do
+    if not it.fromBucket then
+      it.native = it.native or it.procs or {}
+      local extra
+      if it.equipped == 1 and it.entry then
+        nthOfEntry[it.entry] = (nthOfEntry[it.entry] or 0) + 1
+        local slots = slotsByEntry[it.entry]
+        it.invSlot = slots and slots[nthOfEntry[it.entry]] or it.invSlot
+        extra = it.invSlot and state.buckets["E:" .. it.invSlot]
+      else
+        extra = state.buckets["B:" .. it.bag .. ":" .. it.slot]
+      end
+      local out, have = {}, {}
+      for _, p in ipairs(it.native) do
+        local k = p.spell .. ":" .. p.trigger
+        if not have[k] then have[k] = true; out[#out + 1] = p end
+      end
+      if extra then
+        for _, p in ipairs(extra.procs or {}) do
+          local k = p.spell .. ":" .. p.trigger
+          if not have[k] then have[k] = true; out[#out + 1] = p end
+        end
+      end
+      it.procs = out
+    end
+  end
+end
+
 local function commitItems()
   local out
   if state.exiStaging then
@@ -141,6 +185,7 @@ local function commitItems()
     return itemLabel(a) < itemLabel(b)
   end)
   state.items = out
+  mergeBucketProcs()
   -- drop dead selections
   local function still(sel)
     if not sel then return nil end
@@ -163,7 +208,7 @@ local function requestAll(force)
   end
   state.lastReq = now
   state.exiStaging = nil
-  send("ICEXSRC"); send("ICCOLL"); send("ICBPGET")
+  send("ICEXSRC"); send("ICCOLL"); send("ICBPGET"); send("ICINV")
   setStatus("Asking the server...")
 end
 
@@ -228,7 +273,12 @@ local function onWire(msg)
     if state.bStaging then
       state.buckets = state.bStaging
       state.bStaging = nil; state.bCurKey = nil
-      if not state.haveExi then commitItems() end
+      if state.haveExi then
+        mergeBucketProcs()
+        if UI and UI:IsShown() then UI:Refresh() end
+      else
+        commitItems()
+      end
     end
 
   -- ---- collection ----------------------------------------------------------
