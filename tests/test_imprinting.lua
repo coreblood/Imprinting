@@ -26,6 +26,7 @@ end
 
 local ITEMS = { [5000] = "Surrogate Belt", [5001] = "Valanar's Ring", [5002] = "Squire's Shirt" }
 function GetItemInfo(x) return ITEMS[tonumber(x)] end
+function ITEMS_ADD(id, name) ITEMS[id] = name end
 function GetContainerItemLink() return nil end
 function GetContainerItemInfo() return nil end
 INV_LINKS = {}
@@ -79,6 +80,10 @@ local function mkFrame()
   f.SetAutoFocus = noop; f.ClearFocus = noop
   f.SetMinMaxValues = noop; f.SetValueStep = noop; f.SetValue = noop
   f.GetCenter = function() return 0, 0 end
+  f.SetOwner = function(self, o) self.owner = o end
+  f.IsOwned = function(self, o) return self.owner == o end
+  f.SetHyperlink = function(self, l) self.link = l end
+  f.AddLine = noop
   f.GetEffectiveScale = function() return 1 end
   return f
 end
@@ -99,6 +104,11 @@ function CreateFrame(kind, name, parent, template)
 end
 Minimap = mkFrame()
 UIParent = mkFrame()
+GameTooltip = mkFrame()
+GameTooltip.SetOwner = function(self, o) self.owner = o end
+GameTooltip.IsOwned = function(self, o) return self.owner == o end
+GameTooltip.SetHyperlink = function(self, l) self.link = l end
+GameTooltip.AddLine = function() end
 
 -- ---- load the addon ---------------------------------------------------------
 dofile("/home/claude/build/Imprinting/Imprinting.lua")
@@ -376,6 +386,68 @@ if gEv then
   gEv.scripts["OnEvent"](gEv, "UNIT_INVENTORY_CHANGED", "player")
   T("glow: gear-change repaint survives", gt[6].shown and gt[11].shown)
 end
+
+
+-- ---- 20. v1.2.0: source line on collection rows ---------------------------------------------
+S.tab = "coll"
+S.search = ""
+ImprintingDB.showHidden = false
+for k in pairs(ImprintingDB.hidden) do ImprintingDB.hidden[k] = nil end
+ImprintingFrame:Refresh()
+local effRowFrames = {}
+for _, fr in ipairs(frames) do
+  if fr.kind == "Button" and fr.src and fr.shown and fr.data and fr.data.spell and fr.data.trigger
+     and not fr.data.item then effRowFrames[#effRowFrames + 1] = fr end
+end
+T("src line: visible collection rows found", #effRowFrames > 0)
+local beltRow, zeroRow
+for _, fr in ipairs(effRowFrames) do
+  if fr.data.src == 5000 then beltRow = beltRow or fr end
+  if fr.data.src == 0 then zeroRow = zeroRow or fr end
+end
+T("src line: named from ICCOLLROW source",
+  beltRow ~= nil and beltRow.src.text ~= nil and beltRow.src.text:find("Surrogate Belt") ~= nil)
+T("src line: src 0 renders empty", zeroRow ~= nil and zeroRow.src.text == "")
+
+-- ---- 21. v1.2.0: search matches the source item name ------------------------------------------
+S.search = "surrogate"
+ImprintingFrame:Refresh()
+local visByRows, expect = 0, 0
+for _, fr in ipairs(effRowFrames) do if fr.shown and fr.data then visByRows = visByRows + 1 end end
+for _, e in ipairs(S.collection) do if e.src == 5000 then expect = expect + 1 end end
+T("search: source-item match", expect > 0 and visByRows == expect)
+S.search = ""
+ImprintingFrame:Refresh()
+
+-- ---- 22. v1.2.0: right-click hide re-fires the tooltip for the row's NEW entry ----------------
+local row1
+for _, fr in ipairs(effRowFrames) do if fr.shown then row1 = row1 or fr end end
+assert(row1, "no visible effect row")
+local firstSpell, firstTrig = row1.data.spell, row1.data.trigger
+GameTooltip.owner = row1                       -- cursor sits on the row
+GameTooltip.link = nil
+row1.scripts["OnClick"](row1, "RightButton")   -- hide it
+T("hide: entry hidden in db", ImprintingDB.hidden[firstSpell .. ":" .. firstTrig] == true)
+T("hide: tooltip re-fired for the row's new entry",
+  row1.data ~= nil and row1.data.spell ~= firstSpell
+  and GameTooltip.link == ("spell:" .. row1.data.spell))
+for k in pairs(ImprintingDB.hidden) do ImprintingDB.hidden[k] = nil end
+ImprintingFrame:Refresh()
+
+-- ---- 23. v1.2.0: primer queries unresolved item names -----------------------------------------
+S.collection[#S.collection + 1] = { spell = 200, trigger = 2, src = 7777 }  -- unknown item id
+local primerFr = _G.ImprintingPrimer
+T("primer: frame exists", primerFr ~= nil)
+primerFr.t, primerFr.ticks, primerFr.last = 0, 0, nil
+primerFr:Show()
+primerFr.scripts["OnUpdate"](primerFr, 1.1)
+T("primer: hidden tooltip asked the server for the unknown item",
+  _G.ImprintingPrimeTip ~= nil and _G.ImprintingPrimeTip.link == "item:7777")
+-- once the name resolves the primer refreshes and stops
+ITEMS_ADD(7777, "Charred Twilight Scale")
+primerFr.scripts["OnUpdate"](primerFr, 1.1)
+T("primer: stops once everything resolves", primerFr:IsShown() == false)
+table.remove(S.collection)
 
 print(string.format("== %d passed, %d failed ==", pass, fail))
 if fail > 0 then os.exit(1) end
