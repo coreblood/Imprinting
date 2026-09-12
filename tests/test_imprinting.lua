@@ -66,7 +66,9 @@ local function mkFrame()
     s.SetJustifyH = noop; s.SetWidth = noop; s.SetHeight = noop; s.SetFontObject = noop
     s.SetWordWrap = noop; return s end
   f.CreateTexture = function() local t = mkFrame(); t.SetAllPoints = noop; t.SetTexture = noop
-    t.SetTexCoord = noop; t.SetSize = noop; return t end
+    t.SetTexCoord = noop; t.SetSize = noop; t.SetBlendMode = noop
+    t.SetVertexColor = function(self, r, g, b, a) self.vr, self.vg, self.vb, self.va = r, g, b, a end
+    return t end
   f.SetText = function(self, t) self.text = t end
   f.GetText = function(self) return self.text end
   f.SetNormalFontObject = noop; f.SetHighlightFontObject = noop
@@ -341,6 +343,39 @@ T("re-merge: belt loses stale bucket, keeps native", (function()
   end
 end)())
 T("re-merge: item count stable", #S.items == 3)
+
+-- ---- 19. paperdoll glows ---------------------------------------------------------------------------
+-- State from tests 17-18: belt worn in slot 6 (native 100, bucket gone after the
+-- last push), ring worn in slot 11 (no native, imprinted 300+999 in bucket).
+CreateFrame("Button", "CharacterHeadSlot")     -- slot 1, empty
+CreateFrame("Button", "CharacterWaistSlot")    -- slot 6, belt
+CreateFrame("Button", "CharacterFinger0Slot")  -- slot 11, ring
+T("glow: db default ON", ImprintingDB.glow == true)
+T("glow: imprint truth on ring", _G.Imprinting.slotHasImprint(11) == true)
+T("glow: no imprint on native-only belt", _G.Imprinting.slotHasImprint(6) == false)
+_G.Imprinting.paintGlows()
+local gt = _G.Imprinting.glowTex
+T("glow: ring purple + shown", gt[11] and gt[11].shown and gt[11].vr < 0.9 and gt[11].vb == 1)
+T("glow: belt red + shown", gt[6] and gt[6].shown and gt[6].vr == 1 and gt[6].vb < 0.5)
+T("glow: empty slot hidden", gt[1] and gt[1].shown == false)
+ImprintingDB.glow = false
+_G.Imprinting.paintGlows()
+T("glow: tick off hides all", gt[11].shown == false and gt[6].shown == false)
+ImprintingDB.glow = true
+local keepB, keepE = S.buckets, S.haveExi
+S.buckets = {}; S.haveExi = false
+_G.Imprinting.paintGlows()
+T("glow: no data paints nothing (no false red)", gt[6].shown == false and gt[11].shown == false)
+S.buckets = keepB; S.haveExi = keepE
+_G.Imprinting.paintGlows()
+T("glow: data back, glows return", gt[11].shown and gt[6].shown)
+local gEv
+for _, f in ipairs(frames) do if f.events["UNIT_INVENTORY_CHANGED"] then gEv = f end end
+T("glow: inventory event frame exists", gEv ~= nil)
+if gEv then
+  gEv.scripts["OnEvent"](gEv, "UNIT_INVENTORY_CHANGED", "player")
+  T("glow: gear-change repaint survives", gt[6].shown and gt[11].shown)
+end
 
 print(string.format("== %d passed, %d failed ==", pass, fail))
 if fail > 0 then os.exit(1) end

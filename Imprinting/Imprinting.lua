@@ -9,7 +9,7 @@
 -- ICEXI dialect (requested) and the ICINV dialect (pushed by the live realm).
 -- ============================================================================
 
-local VERSION = "1.0.1"
+local VERSION = "1.1.0"
 local SEND_PREFIX, RECV_PREFIX = "REAGENTBANK", "UNC"
 local ME = UnitName("player")
 
@@ -44,6 +44,7 @@ local state = {
 }
 
 local UI, dbgOn
+local PaintGlows -- paperdoll glow painter, assigned near the bottom
 
 -- small debug handle (harness + live /run diagnosis)
 _G.Imprinting = { version = VERSION, state = state }
@@ -195,6 +196,7 @@ local function commitItems()
   state.selTarget = still(state.selTarget)
   state.selSource = state.selSource and still({ key = state.selSource.key }) and state.selSource or nil
   if UI and UI:IsShown() then UI:Refresh() end
+  if PaintGlows then PaintGlows() end
 end
 
 -- ---------------------------------------------------------------------------
@@ -276,6 +278,7 @@ local function onWire(msg)
       if state.haveExi then
         mergeBucketProcs()
         if UI and UI:IsShown() then UI:Refresh() end
+        if PaintGlows then PaintGlows() end
       else
         commitItems()
       end
@@ -730,7 +733,7 @@ local function BuildUI()
 
   -- ---- options panel -----------------------------------------------------------
   local o = CreateFrame("Frame", nil, f)
-  o:SetSize(240, 160)
+  o:SetSize(250, 190)
   o:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -60)
   o:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8",
     edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 12,
@@ -761,9 +764,12 @@ local function BuildUI()
   o.cConfirm = optCheck("ImprintingOptConfirm", "Confirm before imprinting", -54,
     function() return db.confirmOverwrite end,
     function(v) db.confirmOverwrite = v end)
+  o.cGlow = optCheck("ImprintingOptGlow", "Glow equipped gear (purple = imprinted)", -78,
+    function() return db.glow end,
+    function(v) db.glow = v; if PaintGlows then PaintGlows() end end)
 
   local sl = CreateFrame("Slider", "ImprintingOptOpacity", o, "OptionsSliderTemplate")
-  sl:SetPoint("TOPLEFT", 16, -100); sl:SetWidth(200)
+  sl:SetPoint("TOPLEFT", 16, -124); sl:SetWidth(200)
   sl:SetMinMaxValues(0.5, 1); sl:SetValueStep(0.05)
   _G["ImprintingOptOpacityText"]:SetText("Window opacity")
   _G["ImprintingOptOpacityLow"]:SetText("50%"); _G["ImprintingOptOpacityHigh"]:SetText("100%")
@@ -954,6 +960,92 @@ local function BuildMini()
 end
 
 -- ---------------------------------------------------------------------------
+-- Paperdoll glows: purple ring on equipped pieces carrying an IMPRINTED proc
+-- (a bucket proc not in the item's native set), red ring on pieces without
+-- one. Shirt and tabard excluded (never imprint targets); empty slots and
+-- pre-data states show nothing rather than a false red.
+-- ---------------------------------------------------------------------------
+local GLOW_SLOTS = {
+  [1] = "CharacterHeadSlot", [2] = "CharacterNeckSlot", [3] = "CharacterShoulderSlot",
+  [5] = "CharacterChestSlot", [6] = "CharacterWaistSlot", [7] = "CharacterLegsSlot",
+  [8] = "CharacterFeetSlot", [9] = "CharacterWristSlot", [10] = "CharacterHandsSlot",
+  [11] = "CharacterFinger0Slot", [12] = "CharacterFinger1Slot",
+  [13] = "CharacterTrinket0Slot", [14] = "CharacterTrinket1Slot",
+  [15] = "CharacterBackSlot", [16] = "CharacterMainHandSlot",
+  [17] = "CharacterSecondaryHandSlot", [18] = "CharacterRangedSlot",
+}
+local glowTex = {}
+
+local function glowFor(slot)
+  local t = glowTex[slot]
+  if t then return t end
+  local btn = _G[GLOW_SLOTS[slot]]
+  if not btn then return nil end
+  t = btn:CreateTexture(nil, "OVERLAY")
+  t:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+  t:SetBlendMode("ADD")
+  t:SetPoint("CENTER")
+  t:SetSize(66, 66) -- paperdoll buttons are 37x37; the border art needs ~1.8x
+  glowTex[slot] = t
+  return t
+end
+
+local function slotHasImprint(slot)
+  local b = state.buckets["E:" .. slot]
+  if not b or not b.procs or #b.procs == 0 then return false end
+  local native = {}
+  for _, it in ipairs(state.items) do
+    if not it.fromBucket and it.equipped == 1 and it.invSlot == slot then
+      for _, p in ipairs(it.native or {}) do native[p.spell .. ":" .. p.trigger] = true end
+    end
+  end
+  for _, p in ipairs(b.procs) do
+    if not native[p.spell .. ":" .. p.trigger] then return true end
+  end
+  return false
+end
+
+PaintGlows = function()
+  if not db then return end
+  local haveData = state.haveExi or next(state.buckets) ~= nil
+  for slot in pairs(GLOW_SLOTS) do
+    local t = glowFor(slot)
+    if t then
+      if db.glow and haveData and GetInventoryItemLink("player", slot) then
+        if slotHasImprint(slot) then
+          t:SetVertexColor(0.65, 0.25, 1.0, 0.9)  -- purple: imprinted
+        else
+          t:SetVertexColor(1.0, 0.15, 0.15, 0.8)  -- red: no imprint yet
+        end
+        t:Show()
+      else
+        t:Hide()
+      end
+    end
+  end
+end
+_G.Imprinting.paintGlows = function() PaintGlows() end
+_G.Imprinting.slotHasImprint = slotHasImprint
+_G.Imprinting.glowTex = glowTex
+
+local glowEv = CreateFrame("Frame")
+glowEv:RegisterEvent("PLAYER_ENTERING_WORLD")
+glowEv:RegisterEvent("UNIT_INVENTORY_CHANGED")
+glowEv:SetScript("OnEvent", function(_, event, unit)
+  if event == "UNIT_INVENTORY_CHANGED" and unit ~= "player" then return end
+  if not db then return end
+  if event == "PLAYER_ENTERING_WORLD" and db.glow then requestSoon(3) end
+  mergeBucketProcs()
+  PaintGlows()
+end)
+if CharacterFrame and CharacterFrame.HookScript then
+  CharacterFrame:HookScript("OnShow", function()
+    if db and db.glow then requestAll() end
+    PaintGlows()
+  end)
+end
+
+-- ---------------------------------------------------------------------------
 -- Boot
 -- ---------------------------------------------------------------------------
 local boot = CreateFrame("Frame")
@@ -967,6 +1059,7 @@ boot:SetScript("OnEvent", function(self, event, arg1, arg2, arg3, arg4)
     db.hidden = db.hidden or {}
     if db.showHidden == nil then db.showHidden = false end
     if db.confirmOverwrite == nil then db.confirmOverwrite = true end
+    if db.glow == nil then db.glow = true end
     db.opacity = db.opacity or 1
     db.minimap = db.minimap or { show = true, angle = 200 }
     if db.minimap.show == nil then db.minimap.show = true end
