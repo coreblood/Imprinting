@@ -28,7 +28,8 @@ local ITEMS = { [5000] = "Surrogate Belt", [5001] = "Valanar's Ring", [5002] = "
 function GetItemInfo(x) return ITEMS[tonumber(x)] end
 function GetContainerItemLink() return nil end
 function GetContainerItemInfo() return nil end
-function GetInventoryItemLink() return nil end
+INV_LINKS = {}
+function GetInventoryItemLink(_, slot) return INV_LINKS[slot] end
 function GetInventoryItemTexture() return nil end
 function GetCursorPosition() return 0, 0 end
 function PlaySoundFile() end
@@ -212,7 +213,8 @@ SlashCmdList["IMPRINTING"]("")
 T("toggle: window shown after first press", ImprintingFrame and ImprintingFrame:IsShown())
 T("toggle: open sends requests", table.concat(sent, " "):find("ICEXSRC") ~= nil
   and table.concat(sent, " "):find("ICCOLL") ~= nil
-  and table.concat(sent, " "):find("ICBPGET") ~= nil)
+  and table.concat(sent, " "):find("ICBPGET") ~= nil
+  and table.concat(sent, " "):find("ICINV") ~= nil)
 
 -- ---- 10. request throttle -------------------------------------------------------------------
 local n = #sent
@@ -221,7 +223,7 @@ ImprintingFrame.refreshBtn.scripts["OnClick"]()
 T("throttle: refresh inside 10s sends nothing", #sent == n)
 _TIME = 200
 ImprintingFrame.refreshBtn.scripts["OnClick"]()
-T("throttle: refresh after window sends", #sent == n + 3)
+T("throttle: refresh after window sends", #sent == n + 4)
 
 -- ---- 11. hide / show hidden ------------------------------------------------------------------
 ImprintingDB.hidden["100:2"] = true
@@ -290,7 +292,55 @@ T("exok: status set", S.status:find("Imprinted") ~= nil)
 T("exok: timer armed", reqT and reqT:IsShown())
 _TIME = 300
 if reqT then reqT.scripts["OnUpdate"](reqT, 5) end
-T("exok: delayed re-request fired", #sent == nS + 3)
+T("exok: delayed re-request fired", #sent == nS + 4)
+
+-- ---- 17. imprinted procs merge onto ICEXI rows -----------------------------------------------------
+-- fresh exi sweep: worn belt (native proc 100), worn ring (no native proc),
+-- bag shirt (no native proc)
+INV_LINKS = { [6] = "|Hitem:5000:0:0|h[Surrogate Belt]|h",
+              [11] = "|Hitem:5001:0:0|h[Valanar's Ring]|h" }
+wire("ICEXI:255:5:5000:1:100:2")
+wire("ICEXI:255:10:5001:1:0:0")
+wire("ICEXI:1:7:5002:0:0:0")
+wire("ICEXIEND")
+-- ICINV: belt slot carries native 100 PLUS imprinted 200; ring slot imprinted 300;
+-- bag shirt at server coords 1:7 imprinted 301
+wire("ICITEM:E:6")
+wire("ICIPROC:100:2:15:100")
+wire("ICIPROC:200:1:10:100")
+wire("ICITEM:E:11")
+wire("ICIPROC:300:0:5:100")
+wire("ICITEM:B:1:7")
+wire("ICIPROC:301:0:5:100")
+wire("ICINVEND")
+local belt, ring2, shirt2
+for _, it in ipairs(S.items) do
+  if it.entry == 5000 then belt = it elseif it.entry == 5001 then ring2 = it
+  elseif it.entry == 5002 then shirt2 = it end
+end
+T("merge: exi rows kept", #S.items == 3)
+T("merge: native + imprinted deduped", belt and #belt.procs == 2)
+T("merge: imprinted only on clean worn piece", ring2 and #ring2.procs == 1
+  and ring2.procs[1].spell == 300)
+T("merge: worn invSlot resolved via entry", belt and belt.invSlot == 6)
+T("merge: bag row by exact server coords", shirt2 and #shirt2.procs == 1
+  and shirt2.procs[1].spell == 301)
+T("merge: native list untouched", belt and #belt.native == 1)
+
+-- ---- 18. later ICINV push re-merges without clobbering ---------------------------------------------
+wire("ICITEM:E:11")
+wire("ICIPROC:300:0:5:100")
+wire("ICIPROC:999:2:5:100")
+wire("ICINVEND")
+local r3
+for _, it in ipairs(S.items) do if it.entry == 5001 then r3 = it end end
+T("re-merge: new imprint appears", r3 and #r3.procs == 2)
+T("re-merge: belt loses stale bucket, keeps native", (function()
+  for _, it in ipairs(S.items) do
+    if it.entry == 5000 then return #it.procs == 1 and it.procs[1].spell == 100 end
+  end
+end)())
+T("re-merge: item count stable", #S.items == 3)
 
 print(string.format("== %d passed, %d failed ==", pass, fail))
 if fail > 0 then os.exit(1) end
