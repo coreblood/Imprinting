@@ -1,5 +1,5 @@
 -- ============================================================================
--- Imprinting v1.0.0 -- by Mhortai
+-- Imprinting v1.2.0 -- by Mhortai
 -- Standalone remake of the Uncapped Dashboard's Extraction tab.
 --   * Collection tab: browse unlocked effects (named rows, working search and
 --     filters), right-click to hide effects you never use, stamp onto gear.
@@ -9,7 +9,7 @@
 -- ICEXI dialect (requested) and the ICINV dialect (pushed by the live realm).
 -- ============================================================================
 
-local VERSION = "1.1.0"
+local VERSION = "1.2.0"
 local SEND_PREFIX, RECV_PREFIX = "REAGENTBANK", "UNC"
 local ME = UnitName("player")
 
@@ -112,6 +112,54 @@ local function itemIcon(it)
   return tex or QUESTION
 end
 
+-- Grey "from <item>" line for a collection entry (ICCOLLROW's sourceEntry).
+local function srcLabel(e)
+  if not e.src or e.src == 0 then return "" end
+  local name = GetItemInfo(e.src)
+  return "|cff808080from " .. (name or ("item " .. e.src)) .. "|r"
+end
+
+-- ---------------------------------------------------------------------------
+-- Item-name cache primer -- the realm's custom items cache slowly, so names
+-- can come back nil at first. Unresolved entries are queried via a hidden
+-- tooltip and the lists re-painted as answers land. Runs only while the
+-- window is shown: 1s cadence, max 4 queries per tick, stops when everything
+-- resolved or after 15 ticks.
+-- ---------------------------------------------------------------------------
+local primeTip
+local primed = {}
+local function primeItem(id)
+  primed[id] = true
+  primeTip = primeTip or CreateFrame("GameTooltip", "ImprintingPrimeTip", nil, "GameTooltipTemplate")
+  primeTip:SetOwner(UIParent, "ANCHOR_NONE")
+  primeTip:SetHyperlink("item:" .. id)
+end
+local primer = CreateFrame("Frame", "ImprintingPrimer"); primer:Hide()
+primer.t, primer.ticks, primer.last = 0, 0, nil
+primer:SetScript("OnUpdate", function(self, elapsed)
+  self.t = self.t + elapsed
+  if self.t < 1 then return end
+  self.t = 0
+  if not (UI and UI:IsShown()) then self:Hide(); return end
+  local missing, asked = 0, 0
+  local function scan(id)
+    if id and id > 0 and not GetItemInfo(id) then
+      missing = missing + 1
+      if not primed[id] and asked < 4 then primeItem(id); asked = asked + 1 end
+    end
+  end
+  for _, e in ipairs(state.collection) do scan(e.src) end
+  for _, it in ipairs(state.items) do scan(it.entry) end
+  if self.last and missing < self.last then UI:Refresh() end
+  self.last = missing
+  self.ticks = self.ticks + 1
+  if missing == 0 or self.ticks >= 15 then self:Hide() end
+end)
+local function startPrimer()
+  primer.t, primer.ticks, primer.last = 0, 0, nil
+  primer:Show()
+end
+
 local function rebuildFromBuckets()
   local out = {}
   for key, b in pairs(state.buckets) do
@@ -197,6 +245,7 @@ local function commitItems()
   state.selSource = state.selSource and still({ key = state.selSource.key }) and state.selSource or nil
   if UI and UI:IsShown() then UI:Refresh() end
   if PaintGlows then PaintGlows() end
+  startPrimer()
 end
 
 -- ---------------------------------------------------------------------------
@@ -304,6 +353,7 @@ local function onWire(msg)
       return a.trigger < b.trigger
     end)
     if UI and UI:IsShown() then UI:Refresh() end
+    startPrimer()
 
   -- ---- banned register ------------------------------------------------------
   elseif cmd == "ICBPR" then            -- <idx>:<sentence>
@@ -458,7 +508,14 @@ local function visibleEffects()
     elseif state.filter == "pass" then ok = (e.trigger == 0 or e.trigger == 1)
     else ok = true end
     if ok and isHidden(e) and not db.showHidden then ok = false end
-    if ok and q ~= "" then ok = spellName(e.spell):lower():find(q, 1, true) ~= nil end
+    if ok and q ~= "" then
+      local hit = spellName(e.spell):lower():find(q, 1, true)
+      if not hit and e.src and e.src > 0 then
+        local n = GetItemInfo(e.src)
+        hit = n and n:lower():find(q, 1, true)
+      end
+      ok = hit ~= nil
+    end
     if ok then out[#out + 1] = e end
   end
   return out
@@ -605,8 +662,11 @@ local function BuildUI()
     r.icon:SetSize(ROW_H - 6, ROW_H - 6); r.icon:SetPoint("LEFT", 2, 0)
     r.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
     r.name = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    r.name:SetPoint("LEFT", r.icon, "RIGHT", 5, 0); r.name:SetWidth(200); r.name:SetJustifyH("LEFT")
+    r.name:SetPoint("TOPLEFT", r.icon, "TOPRIGHT", 5, 0); r.name:SetWidth(200); r.name:SetJustifyH("LEFT")
     if r.name.SetWordWrap then r.name:SetWordWrap(false) end
+    r.src = r:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    r.src:SetPoint("BOTTOMLEFT", r.icon, "BOTTOMRIGHT", 5, -1); r.src:SetWidth(200); r.src:SetJustifyH("LEFT")
+    if r.src.SetWordWrap then r.src:SetWordWrap(false) end
     r.trig = r:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     r.trig:SetPoint("RIGHT", -4, 0)
     r:RegisterForClicks("LeftButtonUp", "RightButtonUp")
@@ -617,6 +677,12 @@ local function BuildUI()
           local k = hiddenKey(self.data)
           if db.hidden[k] then db.hidden[k] = nil else db.hidden[k] = true end
           f:Refresh()
+          -- Refresh may have put a DIFFERENT entry on this row; a tooltip
+          -- left standing would still describe the old one. Re-fire it.
+          if GameTooltip:IsOwned(self) then
+            if self.data then self:GetScript("OnEnter")(self)
+            else GameTooltip:Hide() end
+          end
           return
         end
         state.selEffect = self.data
@@ -630,6 +696,9 @@ local function BuildUI()
       GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
       if state.tab == "coll" then
         GameTooltip:SetHyperlink("spell:" .. self.data.spell)
+        if self.data.src and self.data.src > 0 then
+          GameTooltip:AddLine("From: " .. ((GetItemInfo(self.data.src)) or ("item " .. self.data.src)), 0.8, 0.8, 0.8)
+        end
         local reason = state.banned[self.data.spell]
         if reason then GameTooltip:AddLine("|cffff4040Disabled:|r " .. reason, 1, 1, 1, true) end
         if isHidden(self.data) then
@@ -824,12 +893,13 @@ local function BuildUI()
         else
           local known = state.collSet[d.spell .. ":" .. d.trigger]
           nm = (known and "|cff707070" or "") .. spellName(d.spell)
-            .. " |cff808080-- " .. itemLabel(d.item) .. "|r"
           if known then nm = nm .. " |cff40ff40(known)|r" end
           if state.selSource and state.selSource.key == d.key
              and state.selSource.spell == d.spell then r.sel:Show() else r.sel:Hide() end
         end
         r.name:SetText(nm)
+        if onColl then r.src:SetText(srcLabel(d))
+        else r.src:SetText("|cff808080from " .. itemLabel(d.item) .. "|r") end
         r.trig:SetText(trigLabel(d.trigger))
         r:Show()
       else
@@ -909,6 +979,7 @@ local function Toggle()
     UI:Show()
     UI:Refresh()
     requestAll()
+    startPrimer()
   end
 end
 
